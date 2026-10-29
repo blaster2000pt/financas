@@ -1,0 +1,18 @@
+{
+  "name": "financas-local",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch backend/server.ts",
+    "dev:web": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "test": "node --test shared/domain.test.ts backend/database.test.ts backend/imports.test.ts",
+    "typecheck:api": "npm --prefix frontend run typecheck:api"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}
