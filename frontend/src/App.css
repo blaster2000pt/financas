@@ -227,7 +227,8 @@
 .review-row.confirmed_duplicate .review-status { color: #8d9290; }
 .review-description { display: grid; flex: 1; min-width: 0; gap: 3px; }
 .review-description strong { overflow: hidden; color: #566259; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.review-description small { overflow: hidden; color: #939c95; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.review-description small { display: block; overflow: visible; color: #939c95; font-size: 9px; text-overflow: clip; white-space: normal; }
+.category-suggestion { display: block; margin-top: 3px; color: #557a5d; }
 .review-row select { flex: 0 0 112px; min-height: 30px; }
 .import-review > .button { margin-top: 13px; }
 .import-result { margin: 11px 0 0; color: #3f7650; font-size: 10px; }

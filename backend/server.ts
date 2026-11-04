@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { accountContext, calculateContextTotals, type Account, type AccountClassification, type FinanceContext, type FinancialCategory, type FinancialReconciliation, type FinancialTransaction, type InvestmentPosition, type ProfileId, type TransactionType } from '../shared/domain.ts'
-import { normalizeImportRow, parseImportFile, suggestImportMapping, type ImportMapping, type NormalizedImportRow, type ParsedImportFile } from './imports.ts'
+import { normalizeImportRow, parseImportFile, suggestImportCategory, suggestImportMapping, type ImportCategoryRule, type ImportMapping, type NormalizedImportRow, type ParsedImportFile } from './imports.ts'
 import { isConfigured, openDatabase } from './database.ts'
 
 const databasePath = process.env.FINANCAS_DB_PATH ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'financas.sqlite')
@@ -161,6 +161,8 @@ interface ImportRowAnalysis {
   rowIndex: number
   status: 'new' | 'probable_duplicate' | 'confirmed_duplicate' | 'invalid'
   normalized?: NormalizedImportRow
+  mappedCategoryId?: string
+  categorySuggestion?: { categoryId: string; categoryName: string; keyword: string }
   error?: string
 }
 
@@ -173,6 +175,35 @@ function analyzeImportRows(
   const fingerprintsSeen = new Set<string>()
   const hasExternalIdentifier = db.prepare('SELECT 1 FROM transactions WHERE account_id = ? AND external_identifier = ? LIMIT 1')
   const hasFingerprint = db.prepare('SELECT 1 FROM transactions WHERE account_id = ? AND fingerprint = ? LIMIT 1')
+  const categories = db.prepare(`
+    SELECT id, name FROM categories
+    WHERE kind = ? AND archived = 0 AND lower(name) = lower(?)
+    LIMIT 1
+  `)
+  const ruleRows = db.prepare(`
+    SELECT r.id, r.keyword, r.category_id AS categoryId, c.name AS categoryName,
+      c.kind, r.created_at AS createdAt, r.rowid AS sequence
+    FROM categorization_rules r JOIN categories c ON c.id = r.category_id
+    WHERE c.archived = 0
+    ORDER BY r.created_at DESC, r.rowid DESC
+  `).all()
+  const rules: ImportCategoryRule[] = ruleRows.map((row) => {
+    if (typeof row.id !== 'string' || typeof row.keyword !== 'string'
+      || typeof row.categoryId !== 'string' || typeof row.categoryName !== 'string'
+      || (row.kind !== 'income' && row.kind !== 'expense')
+      || typeof row.createdAt !== 'string' || typeof row.sequence !== 'number') {
+      throw new Error('Uma regra de categorização armazenada é inválida.')
+    }
+    return {
+      id: row.id,
+      keyword: row.keyword,
+      categoryId: row.categoryId,
+      categoryName: row.categoryName,
+      kind: row.kind,
+      createdAt: row.createdAt,
+      sequence: row.sequence,
+    }
+  })
 
   return parsedFile.rows.map((row, rowIndex) => {
     let normalized: NormalizedImportRow
@@ -180,6 +211,23 @@ function analyzeImportRows(
       normalized = normalizeImportRow(row, rowIndex, mapping)
     } catch (error) {
       return { rowIndex, status: 'invalid', error: error instanceof Error ? error.message : 'Linha inválida.' }
+    }
+
+    const mappedCategory = normalized.importedCategory
+      ? categories.get(normalized.type, normalized.importedCategory) as { id: string; name: string } | undefined
+      : undefined
+    const categorySuggestion = normalized.importedCategory
+      ? undefined
+      : suggestImportCategory(normalized.description, normalized.type, rules)
+    const categoryDetails = {
+      ...(mappedCategory ? { mappedCategoryId: mappedCategory.id } : {}),
+      ...(categorySuggestion
+        ? { categorySuggestion: {
+          categoryId: categorySuggestion.categoryId,
+          categoryName: categorySuggestion.categoryName,
+          keyword: categorySuggestion.keyword,
+        } }
+        : {}),
     }
 
     const duplicateByExternalId = normalized.externalIdentifier !== null
@@ -190,9 +238,9 @@ function analyzeImportRows(
     if (normalized.externalIdentifier) externalIdsSeen.add(normalized.externalIdentifier)
     fingerprintsSeen.add(normalized.fingerprint)
 
-    if (duplicateByExternalId) return { rowIndex, status: 'confirmed_duplicate', normalized }
-    if (duplicateByFingerprint) return { rowIndex, status: 'probable_duplicate', normalized }
-    return { rowIndex, status: 'new', normalized }
+    if (duplicateByExternalId) return { rowIndex, status: 'confirmed_duplicate', normalized, ...categoryDetails }
+    if (duplicateByFingerprint) return { rowIndex, status: 'probable_duplicate', normalized, ...categoryDetails }
+    return { rowIndex, status: 'new', normalized, ...categoryDetails }
   })
 }
 
@@ -288,6 +336,13 @@ function allFinancialData(database: ReturnType<typeof openDatabase> = db) {
     SELECT id, name, institution, account_id AS accountId, mapping_json AS mappingJson
     FROM import_profiles ORDER BY name
   `).all()
+  const categorizationRules = database.prepare(`
+    SELECT r.id, r.keyword, r.category_id AS categoryId, c.name AS categoryName,
+      c.kind, r.created_at AS createdAt
+    FROM categorization_rules r JOIN categories c ON c.id = r.category_id
+    WHERE c.archived = 0
+    ORDER BY r.created_at DESC, r.rowid DESC
+  `).all()
   const investmentRows = database.prepare(`
     SELECT t.account_id AS accountId, t.asset_id AS assetId, a.name AS assetName, a.symbol,
       SUM(CASE WHEN t.side = 'buy' THEN t.quantity_milli ELSE -t.quantity_milli END) AS quantityMilli
@@ -363,6 +418,7 @@ function allFinancialData(database: ReturnType<typeof openDatabase> = db) {
     reconciliations,
     importBatches,
     importProfiles,
+    categorizationRules,
     investmentPositions,
     investmentAssets,
     investmentPrices: latestPrices,
@@ -487,6 +543,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
             'app_settings', 'financial_profiles', 'accounts', 'account_owners', 'transactions', 'transfers',
             'categories', 'reconciliations', 'import_profiles', 'import_batches', 'import_staging',
             'investment_assets', 'investment_trades', 'investment_prices', 'budgets', 'savings_goals',
+            'categorization_rules',
           ]
           const tableRows = validationDb.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as { name: string }[]
           const tableNames = new Set(tableRows.map((table) => table.name))
@@ -526,7 +583,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
             )
           `).get() as { count: number }).count
           if (integrity.integrity_check !== 'ok' || foreignKeyErrors.length > 0
-            || version.user_version !== 4 || profileCount.count !== 2 || !isConfigured(validationDb)
+            || version.user_version !== 5 || profileCount.count !== 2 || !isConfigured(validationDb)
             || requiredTables.some((table) => !tableNames.has(table))
             || domainData.profiles.map((profile) => profile.id).sort().join(',') !== 'user1,user2'
             || domainData.accounts.length !== accountCount || unownedAccounts > 0
@@ -1085,6 +1142,19 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       if (Object.keys(decisions).some((rowIndex) => Number(rowIndex) >= parsedFile.rows.length)) {
         throw new RequestError('Uma decisão refere-se a uma linha inexistente.')
       }
+      const categoryDecisions: Record<string, string> = {}
+      if (body.categoryDecisions !== undefined) {
+        if (body.categoryDecisions === null || typeof body.categoryDecisions !== 'object' || Array.isArray(body.categoryDecisions)) {
+          throw new RequestError('As decisões de categoria são inválidas.')
+        }
+        for (const [rowIndex, categoryId] of Object.entries(body.categoryDecisions)) {
+          if (!/^\d+$/.test(rowIndex) || Number(rowIndex) >= parsedFile.rows.length
+            || typeof categoryId !== 'string' || categoryId.trim().length === 0) {
+            throw new RequestError('As decisões de categoria são inválidas.')
+          }
+          categoryDecisions[rowIndex] = requiredText(categoryId, 'categoria', 100)
+        }
+      }
       const batchId = randomBytes(16).toString('hex')
       let importedCount = 0
       let ignoredCount = 0
@@ -1116,6 +1186,12 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         `).run(batchId, staging.institution, staging.account_id, staging.filename, parsedFile.rows.length)
 
         for (const analysisRow of analysis) {
+          const selectedCategoryId = categoryDecisions[String(analysisRow.rowIndex)]
+          const canCategorize = analysisRow.status === 'new'
+            || (analysisRow.status === 'probable_duplicate' && decisions[String(analysisRow.rowIndex)] === 'import')
+          if (selectedCategoryId && (!analysisRow.normalized || !canCategorize || analysisRow.normalized.importedCategory)) {
+            throw new RequestError('A decisão de categoria não pode substituir um valor explícito do extrato nem aplicar-se a uma linha que não será importada.')
+          }
           if (analysisRow.status === 'invalid' || !analysisRow.normalized) {
             failedCount += 1
             continue
@@ -1136,6 +1212,13 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
             continue
           }
           const normalized = analysisRow.normalized
+          const selectedCategory = selectedCategoryId
+            ? db.prepare('SELECT id FROM categories WHERE id = ? AND kind = ? AND archived = 0')
+              .get(selectedCategoryId, normalized.type) as { id: string } | undefined
+            : undefined
+          if (selectedCategoryId && !selectedCategory) {
+            throw new RequestError('A categoria selecionada não é válida para o tipo deste movimento.')
+          }
           const matchingCategory = normalized.importedCategory
             ? db.prepare('SELECT id FROM categories WHERE kind = ? AND lower(name) = lower(?) AND archived = 0')
               .get(normalized.type, normalized.importedCategory) as { id: string } | undefined
@@ -1150,7 +1233,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
             normalized.description,
             normalized.importedCategory,
             normalized.date,
-            matchingCategory?.id ?? null,
+            selectedCategory?.id ?? matchingCategory?.id ?? null,
             normalized.externalIdentifier,
             normalized.fingerprint,
             batchId,
@@ -1170,6 +1253,29 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         throw error
       }
       respond(response, 201, { batchId, importedCount, ignoredCount, duplicateCount, failedCount })
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/categorization-rules') {
+      const body = await readJson(request)
+      const keyword = requiredText(body.keyword, 'texto da regra', 100)
+      const categoryId = requiredText(body.categoryId, 'categoria', 100)
+      const category = db.prepare('SELECT id FROM categories WHERE id = ? AND archived = 0')
+        .get(categoryId) as { id: string } | undefined
+      if (!category) throw new RequestError('Selecione uma categoria ativa.')
+      const id = randomBytes(16).toString('hex')
+      db.prepare('INSERT INTO categorization_rules (id, keyword, category_id) VALUES (?, ?, ?)')
+        .run(id, keyword, categoryId)
+      respond(response, 201, { id })
+      return
+    }
+
+    const categorizationRuleMatch = /^\/api\/categorization-rules\/([^/]+)$/.exec(url.pathname)
+    if (request.method === 'DELETE' && categorizationRuleMatch) {
+      const ruleId = requiredText(decodeURIComponent(categorizationRuleMatch[1]), 'regra', 100)
+      const result = db.prepare('DELETE FROM categorization_rules WHERE id = ?').run(ruleId)
+      if (result.changes === 0) throw new RequestError('A regra não foi encontrada.', 404)
+      respond(response, 200, { id: ruleId })
       return
     }
 

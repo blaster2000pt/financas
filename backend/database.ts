@@ -8,9 +8,14 @@ const defaultDatabasePath = join(dirname(fileURLToPath(import.meta.url)), '..', 
 export function openDatabase(filename = process.env.FINANCAS_DB_PATH ?? defaultDatabasePath): DatabaseSync {
   if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true })
   const db = new DatabaseSync(filename)
-  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  try {
+    db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  } catch (error) {
+    db.close()
+    throw error
+  }
   let { user_version: version } = db.prepare('PRAGMA user_version').get() as { user_version: number }
-  if (version > 4) {
+  if (version > 5) {
     db.close()
     throw new Error(`A base de dados está na versão ${version}, mais recente do que a versão suportada.`)
   }
@@ -344,6 +349,27 @@ export function openDatabase(filename = process.env.FINANCAS_DB_PATH ?? defaultD
         ) STRICT;
 
         PRAGMA user_version = 4;
+      `)
+      db.exec('COMMIT')
+      version = 4
+    } catch (error) {
+      db.exec('ROLLBACK')
+      db.close()
+      throw error
+    }
+  }
+  if (version === 4) {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.exec(`
+        CREATE TABLE categorization_rules (
+          id TEXT PRIMARY KEY,
+          keyword TEXT NOT NULL CHECK (length(trim(keyword)) BETWEEN 1 AND 100),
+          category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        ) STRICT;
+        CREATE INDEX categorization_rules_created ON categorization_rules(created_at DESC, id DESC);
+        PRAGMA user_version = 5;
       `)
       db.exec('COMMIT')
     } catch (error) {

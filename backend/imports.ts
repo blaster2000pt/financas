@@ -18,6 +18,37 @@ export interface ImportMapping {
   positiveAmountIs?: 'income' | 'expense'
 }
 
+export interface ImportCategoryRule {
+  id: string
+  keyword: string
+  categoryId: string
+  categoryName: string
+  kind: 'income' | 'expense'
+  createdAt: string
+  sequence?: number
+}
+
+export function normalizeCategorizationText(value: string): string {
+  return value.trim().toLocaleLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+export function suggestImportCategory(
+  description: string,
+  kind: 'income' | 'expense',
+  rules: ImportCategoryRule[],
+): ImportCategoryRule | undefined {
+  const normalizedDescription = normalizeCategorizationText(description)
+  return [...rules]
+    .sort((first, second) => second.createdAt.localeCompare(first.createdAt)
+      || (second.sequence ?? 0) - (first.sequence ?? 0)
+      || second.id.localeCompare(first.id))
+    .find((rule) => {
+      const keyword = normalizeCategorizationText(rule.keyword)
+      return keyword.length > 0 && rule.kind === kind && normalizedDescription.includes(keyword)
+    })
+}
+
 export function suggestImportMapping(headers: string[]): Partial<ImportMapping> {
   const normalized = (header: string) => header.toLocaleLowerCase().normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ')
