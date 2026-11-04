@@ -27,6 +27,7 @@ interface FinancialData {
   reconciliations: FinancialReconciliation[]
   importBatches: ImportBatch[]
   importProfiles: ImportProfile[]
+  categorizationRules: CategorizationRule[]
   investmentAssets: InvestmentAsset[]
   investmentPositions: InvestmentPosition[]
   budgets: FinancialBudget[]
@@ -57,6 +58,15 @@ interface ImportProfile {
   mappingJson: string
 }
 
+interface CategorizationRule {
+  id: string
+  keyword: string
+  categoryId: string
+  categoryName: string
+  kind: 'income' | 'expense'
+  createdAt: string
+}
+
 interface ImportMappingForm {
   dateColumn: string
   descriptionColumn: string
@@ -78,6 +88,8 @@ interface ImportAnalysisRow {
     type: 'income' | 'expense'
     importedCategory: string
   }
+  mappedCategoryId?: string
+  categorySuggestion?: { categoryId: string; categoryName: string; keyword: string }
   error?: string
 }
 
@@ -313,7 +325,7 @@ function App() {
             </section>
           </div>
 
-          <ImportWizard accounts={data.accounts.filter((account) => !account.archived && account.classification !== 'investment')} batches={data.importBatches} profiles={data.importProfiles} onChanged={() => void refresh()} />
+          <ImportWizard accounts={data.accounts.filter((account) => !account.archived && account.classification !== 'investment')} batches={data.importBatches} profiles={data.importProfiles} categories={data.categories} rules={data.categorizationRules} onChanged={() => void refresh()} />
           <AnalyticsPanel
             transactions={visibleTransactions}
             accounts={data.accounts}
@@ -552,7 +564,7 @@ function TransferForm({ accounts, onCreated }: { accounts: Account[]; onCreated:
   </div>
 }
 
-function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Account[]; batches: ImportBatch[]; profiles: ImportProfile[]; onChanged: () => void }) {
+function ImportWizard({ accounts, batches, profiles, categories, rules, onChanged }: { accounts: Account[]; batches: ImportBatch[]; profiles: ImportProfile[]; categories: FinancialCategory[]; rules: CategorizationRule[]; onChanged: () => void }) {
   const [file, setFile] = useState<File | null>(null)
   const [importId, setImportId] = useState('')
   const [headers, setHeaders] = useState<string[]>([])
@@ -572,15 +584,20 @@ function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Ac
   })
   const [analysis, setAnalysis] = useState<ImportAnalysisRow[] | null>(null)
   const [decisions, setDecisions] = useState<Record<string, 'import' | 'skip'>>({})
+  const [categoryDecisions, setCategoryDecisions] = useState<Record<string, string>>({})
   const [error, setError] = useState('')
   const [resultMessage, setResultMessage] = useState('')
   const [profileName, setProfileName] = useState('')
+  const [ruleKeyword, setRuleKeyword] = useState('')
+  const [ruleCategoryId, setRuleCategoryId] = useState('')
+  const [ruleError, setRuleError] = useState('')
   const [busy, setBusy] = useState(false)
 
   function updateMapping(field: keyof ImportMappingForm, value: string) {
     setMapping((current) => ({ ...current, [field]: value }))
     setAnalysis(null)
     setDecisions({})
+    setCategoryDecisions({})
   }
 
   async function previewFile(event: FormEvent<HTMLFormElement>) {
@@ -639,6 +656,7 @@ function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Ac
         positiveAmountIs: response.suggestedMapping.positiveAmountIs ?? 'expense',
       })
       setAnalysis(null)
+      setCategoryDecisions({})
       setDecisions({})
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Não foi possível ler o ficheiro.')
@@ -659,6 +677,7 @@ function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Ac
       )
       setAnalysis(response.rows)
       setDecisions({})
+      setCategoryDecisions({})
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Não foi possível analisar as linhas.')
     } finally {
@@ -678,7 +697,7 @@ function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Ac
       const summary = await request<{ batchId: string; importedCount: number; ignoredCount: number; duplicateCount: number; failedCount: number }>(
         '/api/imports/commit',
         'POST',
-        { importId, decisions },
+        { importId, decisions, categoryDecisions },
       )
       setResultMessage(`Importados: ${summary.importedCount} · ignorados: ${summary.ignoredCount} · duplicados: ${summary.duplicateCount} · linhas inválidas: ${summary.failedCount}`)
       setImportId('')
@@ -756,6 +775,32 @@ function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Ac
     }
   }
 
+  async function saveCategorizationRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setRuleError('')
+    try {
+      await request('/api/categorization-rules', 'POST', {
+        keyword: ruleKeyword,
+        categoryId: ruleCategoryId,
+      })
+      setRuleKeyword('')
+      setRuleCategoryId('')
+      onChanged()
+    } catch (cause) {
+      setRuleError(cause instanceof Error ? cause.message : 'Não foi possível guardar a regra.')
+    }
+  }
+
+  async function deleteCategorizationRule(rule: CategorizationRule) {
+    setRuleError('')
+    try {
+      await request(`/api/categorization-rules/${rule.id}`, 'DELETE')
+      onChanged()
+    } catch (cause) {
+      setRuleError(cause instanceof Error ? cause.message : 'Não foi possível remover a regra.')
+    }
+  }
+
   const amountColumnOptions = [['amountColumn', 'Montante único'], ['debitColumn', 'Débito'], ['creditColumn', 'Crédito']] as const
   const reviewRows = analysis?.filter((row) => row.status !== 'new' || row.rowIndex < 12) ?? []
 
@@ -763,6 +808,17 @@ function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Ac
     <div className="section-heading"><div><p className="eyebrow">IMPORTAÇÃO GUIADA</p><h2>Importar um extrato</h2></div><span className="count-pill">CSV · XLSX</span></div>
     <div className="import-content">
       <p className="import-intro">Os ficheiros são lidos localmente. Veja o mapeamento e os possíveis duplicados antes de confirmar.</p>
+      <div className="categorization-rules">
+        <div className="planning-subheading"><strong>Regras de categorização</strong></div>
+        <p className="field-note">Uma regra sugere uma categoria quando a descrição contém o texto indicado (sem distinguir maiúsculas ou acentos). A regra mais recente prevalece; cada sugestão tem de ser escolhida na pré-visualização e confirmada com a importação. Categorias indicadas no extrato têm prioridade.</p>
+        <form className="inline-form" onSubmit={(event) => void saveCategorizationRule(event)}>
+          <label>Texto contido na descrição<input value={ruleKeyword} onChange={(event) => setRuleKeyword(event.target.value)} required maxLength={100} /></label>
+          <label>Categoria a sugerir<select value={ruleCategoryId} onChange={(event) => setRuleCategoryId(event.target.value)} required><option value="">Escolher categoria</option>{categories.map((category) => <option value={category.id} key={category.id}>{category.name} · {category.kind === 'expense' ? 'Despesa' : 'Receita'}</option>)}</select></label>
+          <button className="button button-secondary" type="submit">Guardar regra</button>
+        </form>
+        {rules.length > 0 && <div className="batch-history"><strong>Regras guardadas</strong>{rules.map((rule) => <div className="batch-row" key={rule.id}><div><b>Descrição contém «{rule.keyword}» → {rule.categoryName}</b><small>{rule.kind === 'expense' ? 'Despesa' : 'Receita'} · aplicada apenas como sugestão na pré-visualização</small></div><button className="text-button" type="button" onClick={() => void deleteCategorizationRule(rule)}>Remover</button></div>)}</div>}
+        {ruleError && <p className="form-error" role="alert">{ruleError}</p>}
+      </div>
       {accounts.length === 0 && <p className="empty-note">Para importar movimentos, selecione uma conta ativa que não esteja classificada como investimento. As compras e vendas de ativos são registadas pela área de investimentos.</p>}
       <form className="import-start-form" onSubmit={(event) => void previewFile(event)}>
         <label>Conta de destino<select name="accountId" value={accountId} onChange={(event) => setAccountId(event.target.value)} required><option value="">Escolher conta</option>{accounts.map((account) => <option value={account.id} key={account.id}>{account.name}</option>)}</select></label>
@@ -788,7 +844,7 @@ function ImportWizard({ accounts, batches, profiles, onChanged }: { accounts: Ac
 
       {analysis && <div className="import-review">
         <div className="mapping-heading"><strong>Revisão de movimentos</strong><span>{analysis.filter((row) => row.status === 'new').length} novos · {analysis.filter((row) => row.status.includes('duplicate')).length} possíveis duplicados · {analysis.filter((row) => row.status === 'invalid').length} inválidos</span></div>
-        <div className="review-list">{reviewRows.map((row) => <div className={`review-row ${row.status}`} key={row.rowIndex}><span className="review-status">{row.status === 'new' ? 'Novo' : row.status === 'probable_duplicate' ? 'Possível duplicado' : row.status === 'confirmed_duplicate' ? 'Duplicado confirmado' : 'Inválido'}</span><div className="review-description"><strong>{row.normalized?.description ?? `Linha ${row.rowIndex + 2}`}</strong><small>{row.normalized ? `${row.normalized.date} · ${row.normalized.type === 'expense' ? 'Despesa' : 'Receita'} · ${formatEur(row.normalized.amountMinor)}${row.normalized.importedCategory ? ` · ${row.normalized.importedCategory}` : ''}` : row.error}</small></div>{row.status === 'probable_duplicate' && <select aria-label={`Decisão para a linha ${row.rowIndex + 2}`} value={decisions[String(row.rowIndex)] ?? ''} onChange={(event) => setDecisions((current) => ({ ...current, [row.rowIndex]: event.target.value as 'import' | 'skip' }))}><option value="">Escolher…</option><option value="import">Importar</option><option value="skip">Ignorar</option></select>}</div>)}</div>
+        <div className="review-list">{reviewRows.map((row) => <div className={`review-row ${row.status}`} key={row.rowIndex}><span className="review-status">{row.status === 'new' ? 'Novo' : row.status === 'probable_duplicate' ? 'Possível duplicado' : row.status === 'confirmed_duplicate' ? 'Duplicado confirmado' : 'Inválido'}</span><div className="review-description"><strong>{row.normalized?.description ?? `Linha ${row.rowIndex + 2}`}</strong><small>{row.normalized ? `${row.normalized.date} · ${row.normalized.type === 'expense' ? 'Despesa' : 'Receita'} · ${formatEur(row.normalized.amountMinor)}${row.normalized.importedCategory ? ` · Categoria do extrato: ${row.normalized.importedCategory}` : ''}` : row.error}{row.categorySuggestion && <span className="category-suggestion">Regra: descrição contém «{row.categorySuggestion.keyword}» → {row.categorySuggestion.categoryName}. A sugestão não será aplicada sem a escolher.</span>}</small></div>{row.categorySuggestion && !row.normalized?.importedCategory && (row.status === 'new' || (row.status === 'probable_duplicate' && decisions[String(row.rowIndex)] === 'import')) && <label>Categoria sugerida<select aria-label={`Categoria sugerida para a linha ${row.rowIndex + 2}`} value={categoryDecisions[String(row.rowIndex)] ?? ''} onChange={(event) => setCategoryDecisions((current) => ({ ...current, [row.rowIndex]: event.target.value }))}><option value="">Não aplicar sugestão</option>{categories.filter((category) => category.kind === row.normalized?.type).map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}</select></label>}{row.status === 'probable_duplicate' && <select aria-label={`Decisão para a linha ${row.rowIndex + 2}`} value={decisions[String(row.rowIndex)] ?? ''} onChange={(event) => { const action = event.target.value as 'import' | 'skip'; setDecisions((current) => ({ ...current, [row.rowIndex]: action })); if (action === 'skip') setCategoryDecisions((current) => { const updated = { ...current }; delete updated[String(row.rowIndex)]; return updated }) }}><option value="">Escolher…</option><option value="import">Importar</option><option value="skip">Ignorar</option></select>}</div>)}</div>
         {analysis.length > reviewRows.length && <p className="field-note">A tabela mostra as linhas novas iniciais e todos os duplicados/erros; as restantes linhas novas serão importadas após confirmação.</p>}
         <button className="button button-primary" type="button" onClick={() => void commitImport()} disabled={busy}>{busy ? 'A importar…' : 'Confirmar importação'}</button>
       </div>}

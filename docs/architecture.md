@@ -51,12 +51,13 @@ The SQLite schema is versioned and currently includes:
 - `app_settings`: application password hash and future single-instance settings.
 - `categories` and `reconciliations`: categorized flows and dated reported-balance observations.
 - `import_staging`, `import_batches`, and `import_profiles`: temporary file previews, committed import history, and reusable column mappings.
+- `categorization_rules`: user-managed local text-match rules that produce suggestions during import review only.
 - Import provenance on `transactions`, including source, external identifier, fingerprint, source-row data, and batch association.
 - `investment_assets`, `investment_trades`, and `investment_prices`: manual instruments, cash-linked operations with milli-unit quantities, and dated manual quotes.
 - `budgets`: monthly category limits by financial context.
 - `savings_goals`: target amounts, dates, and a manually tracked progress amount.
 
-Categorization rules and more advanced investment accounting remain future work.
+More advanced investment accounting remains future work.
 
 ### Ownership and context
 
@@ -87,6 +88,8 @@ The MVP uses explicit domain transactions rather than a generic ledger. Ordinary
 
 The implemented flow is file selection → preview → column mapping → normalization → duplicate analysis → user confirmation → one atomic batch commit. Keep the source details and import batch on each imported record. External identifiers are preferred for matching; deterministic fingerprints are review signals, not proof. Probable matches require user review rather than silent deletion. Imported category text is retained, but it is linked to a category only when a matching active category of the correct kind exists; unrecognized names are not silently mapped.
 
+Rules match text contained in a movement description after trimming, lowercasing, removing diacritics, and collapsing punctuation/whitespace. Only rules targeting the movement's income/expense kind are considered. If several rules match, the most recently created rule wins; insertion order breaks timestamp ties deterministically. A match is displayed as an explanation and an unselected category choice in the preview; it is never applied unless the user selects a valid active category of the same kind and confirms the import. A non-empty category from the source file takes precedence, including when it does not map to a known category. Rules are local, explicit, and non-retroactive: they never edit imported or manually categorized history, amounts, balances, account ownership, or context.
+
 Undo is limited to the selected batch. Movements edited after import should be preserved and reported as not undone; independent manual edits must never be removed as a side effect. Reapplying mappings or rules must not silently overwrite a manual category decision.
 
 ## Security and privacy decisions
@@ -101,10 +104,10 @@ Undo is limited to the selected batch. Movements edited after import should be p
 
 1. **Foundation:** complete — local startup, schema/migrations, shared-password setup, profiles and account ownership.
 2. **Core finance:** complete — manual movements, categories, transfers, calculated/reported balances and reconciliation.
-3. **Imports:** implemented — CSV/XLSX preview and mapping, import profiles, duplicate review, batches and conservative undo. Categorization rules remain future work.
+3. **Imports:** implemented — CSV/XLSX preview and mapping, import profiles, duplicate review, batches, conservative undo, and transparent local category suggestions.
 4. **Planning and investments:** implemented — budgets, savings goals, basic manual assets/prices, and cash-linked buy/sell operations.
 5. **Analysis UX:** implemented — context-aware totals, monthly category summaries, transaction search, and an explicitly limited three-month historical average.
-6. **Resilience and polish:** implemented — SQLite backup and staged integrity-checked restore with a pre-restore safety copy. Encryption, automated scheduling, and broader browser-level regression coverage remain future work.
+6. **Resilience and polish:** implemented — SQLite backup and staged integrity-checked restore with a pre-restore safety copy. Encryption and automated scheduling remain future work.
 
 ## Risks to guard against
 
